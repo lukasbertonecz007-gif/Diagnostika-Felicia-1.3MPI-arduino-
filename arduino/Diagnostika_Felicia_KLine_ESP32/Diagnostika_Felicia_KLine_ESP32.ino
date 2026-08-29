@@ -235,8 +235,11 @@ void stopKLineSerialForBitBang() {
   digitalWrite(KLINE_TX_PIN, HIGH);
 }
 
-void startKLineSerial() {
-  kline.begin(KW1281_BAUD, SERIAL_8N1, KLINE_RX_PIN, KLINE_TX_PIN);
+unsigned long currentKLineBaud = 10400; // SIMOS 2P standard is 10400 or 9600
+
+void startKLineSerial(unsigned long baud) {
+  currentKLineBaud = baud;
+  kline.begin(baud, SERIAL_8N1, KLINE_RX_PIN, KLINE_TX_PIN);
   delay(AFTER_SERIAL_SWITCH_MS);
 }
 
@@ -244,32 +247,105 @@ void send5BaudByte(uint8_t b) {
   Serial.print(F("sending 5 baud init byte 0x"));
   printHexByte(b);
   Serial.println();
+  
+  // Parita pro KW1281: 7 datových bitů + 1 lichá parita (odd parity)
+  uint8_t ones = 0;
+  for (uint8_t bit = 0; bit < 7; bit++) {
+    if (b & (1 << bit)) ones++;
+  }
+  bool parityOdd = ((ones % 2) == 0); // Pokud je počet 1 sudý, paritní bit musí být 1 pro lichý součet
+  
   digitalWrite(KLINE_TX_PIN, HIGH);
   delay(SLOW_IDLE_BEFORE_MS);
+  
+  // Start bit (LOW)
   digitalWrite(KLINE_TX_PIN, LOW);
   delay(SLOW_BIT_MS);
-  for (uint8_t bit = 0; bit < 8; bit++) {
-    bool one = (b & (1 << bit)) != 0;
-    digitalWrite(KLINE_TX_PIN, one ? HIGH : LOW);
+  
+  // 7 datových bitů (LSB first)
+  for (uint8_t bit = 0; bit < 7; bit++) {
+    bool bitVal = (b & (1 << bit)) != 0;
+    digitalWrite(KLINE_TX_PIN, bitVal ? HIGH : LOW);
     delay(SLOW_BIT_MS);
   }
+  
+  // 1 paritní bit (Odd)
+  digitalWrite(KLINE_TX_PIN, parityOdd ? HIGH : LOW);
+  delay(SLOW_BIT_MS);
+  
+  // Stop bit (HIGH)
   digitalWrite(KLINE_TX_PIN, HIGH);
   delay(SLOW_BIT_MS);
 }
 
-bool wakeKw1281() {
-  Serial.println(F("starting slow init"));
+bool wakeKw1281(uint8_t ecuAddr = VAG_ENGINE_ADDR) {
+  Serial.print(F("starting slow init for ECU address 0x"));
+  printHexByte(ecuAddr);
+  Serial.println();
   kwSeq = 0;
+  
   stopKLineSerialForBitBang();
-  send5BaudByte(VAG_ENGINE_ADDR);
-  Serial.println(F("switching to 9600 baud"));
-  startKLineSerial();
+  
+  // Zkontrolujeme, zda je linka v klidu HIGH (musí mít 12V pullup z auta)
+  if (digitalRead(KLINE_RX_PIN) == LOW) {
+    Serial.println(F("VAROVANI: K-linka je v LOW uz pred inicializaci! Chybí +12V na pinu 16 OBD nebo je linka zkratovana na kostru."));
+  }
+  
+  send5BaudByte(ecuAddr);
+  
+  Serial.println(F("merim odezvu ECU (Sync byte 0x55)..."));
+  
+  // Pokusíme se změřit bitovou rychlost ze synchronizačního bajtu 0x55
+  unsigned long startWait = millis();
+  bool edgeFound = false;
+  
+  // Čekáme na náběžnou/sestupnou hranu start bitu (W4 time: 20-300ms)
+  while (millis() - startWait < 3000) {
+    if (digitalRead(KLINE_RX_PIN) == LOW) {
+      edgeFound = true;
+      break;
+    }
+    delayMicroseconds(50);
+  }
+  
+  unsigned long detectedBaud = 10400; // Výchozí rychlost pro SIMOS 2P
+  
+  if (edgeFound) {
+    // Změříme šířku pulzů v mikrosekundách
+    unsigned long highDuration = pulseIn(KLINE_RX_PIN, HIGH, 50000);
+    if (highDuration > 70 && highDuration < 130) {
+      if (highDuration > 100) detectedBaud = 9600;
+      else detectedBaud = 10400;
+      Serial.print(F("Detekovana rychlost ECU ze sync pulzu: "));
+      Serial.print(detectedBaud);
+      Serial.println(F(" Bd"));
+    }
+  }
+  
+  // Přepneme na HW UART se zjištěnou (nebo výchozí) rychlostí
+  Serial.print(F("switching to "));
+  Serial.print(detectedBaud);
+  Serial.println(F(" baud"));
+  startKLineSerial(detectedBaud);
+  
   Serial.println(F("waiting for ECU response"));
   uint8_t sync = 0, k1 = 0, k2 = 0;
-  if (!readKwByte(&sync, FIRST_TIMEOUT_MS, false)) return false;
+  if (!readKwByte(&sync, FIRST_TIMEOUT_MS, false)) {
+    // Pokud 10400 neodpovědělo, zkusíme přepnout na 9600
+    if (detectedBaud != 9600) {
+      Serial.println(F("zkousim fallback na 9600 baud..."));
+      startKLineSerial(9600);
+      if (!readKwByte(&sync, 1000, false)) return false;
+    } else {
+      return false;
+    }
+  }
+  
   if (!readKwByte(&k1, BYTE_TIMEOUT_MS, false)) return false;
   if (!readKwByte(&k2, BYTE_TIMEOUT_MS, false)) return false;
-  if (sync == 0x55) Serial.println(F("sync byte is OK"));
+  if (sync == 0x55) Serial.println(F("sync byte is OK (0x55)"));
+  Serial.print(F("KW1281 Key bytes: 0x")); printHexByte(k1); Serial.print(F(" 0x")); printHexByte(k2); Serial.println();
+  
   delay(40);
   sendComplement(k2);
   Serial.println(F("KW1281 init OK"));
@@ -515,23 +591,76 @@ void testActuators() {
 
 void hardwareTest() {
   stopKLineSerialForBitBang();
-  digitalWrite(KLINE_TX_PIN, HIGH); delay(150); int hi = digitalRead(KLINE_RX_PIN);
-  digitalWrite(KLINE_TX_PIN, LOW); delay(150); int lo = digitalRead(KLINE_RX_PIN);
-  digitalWrite(KLINE_TX_PIN, HIGH); delay(150); int hi2 = digitalRead(KLINE_RX_PIN);
-  if (hi == HIGH && lo == LOW && hi2 == HIGH) {
+  Serial.println(F("\n--- DIAGNOSTIKA FYZICKEHO HARDWARE K-LINKY ---"));
+  
+  digitalWrite(KLINE_TX_PIN, HIGH);
+  delay(150);
+  int rxIdle = digitalRead(KLINE_RX_PIN);
+  
+  digitalWrite(KLINE_TX_PIN, LOW);
+  delay(150);
+  int rxActive = digitalRead(KLINE_RX_PIN);
+  
+  digitalWrite(KLINE_TX_PIN, HIGH);
+  delay(150);
+  int rxRestored = digitalRead(KLINE_RX_PIN);
+  
+  Serial.print(F("1. Stav linky v klidu (TX=HIGH): RX="));
+  Serial.println(rxIdle == HIGH ? F("HIGH (3.3V) -> OK (12V pull-up je pritomen)") : F("LOW (0V) -> CHYBA!"));
+  
+  Serial.print(F("2. Stav linky pri stazeni (TX=LOW): RX="));
+  Serial.println(rxActive == LOW ? F("LOW (0V) -> OK (Tranzistor stahuje k zemi)") : F("HIGH (3.3V) -> CHYBA!"));
+  
+  Serial.print(F("3. Navrat do klidoveho stavu (TX=HIGH): RX="));
+  Serial.println(rxRestored == HIGH ? F("HIGH (3.3V) -> OK") : F("LOW (0V) -> CHYBA!"));
+  
+  if (rxIdle == HIGH && rxActive == LOW && rxRestored == HIGH) {
     Serial.println(F("APP_HW|OK"));
-    Serial.println(F("hardware round-trip looks OK"));
+    Serial.println(F("VYSLEDEK: Hardwarovy obvod prevodniku je plne funkcni."));
   } else {
     Serial.println(F("APP_HW|FAIL"));
-    Serial.println(F("check wiring, divider, GND and K-line pull-up"));
+    if (rxIdle == LOW && rxActive == LOW) {
+      Serial.println(F("PRICINA CHYBY: K-linka je trvale na 0V (GND). Zkontrolujte:"));
+      Serial.println(F(" - Zda je zapalovani vozu ZAPNUTO (kontrolky sviti)"));
+      Serial.println(F(" - Zda je privedeno +12V z OBD pinu 16 na pull-up odpor prevodniku"));
+      Serial.println(F(" - Zda neni K-linka odpojena nebo zkratovana"));
+    } else if (rxIdle == HIGH && rxActive == HIGH) {
+      Serial.println(F("PRICINA CHYBY: Tranzistor nestahuje K-linku k zemi. Zkontrolujte:"));
+      Serial.println(F(" - Zapojeni baze tranzistoru (GPIO 2 pres odpor cca 1k-4.7k)"));
+      Serial.println(F(" - Zapojeni emitoru tranzistoru na spolecne GND"));
+    }
   }
+  Serial.println(F("----------------------------------------------\n"));
+}
+
+void scanAllEcus() {
+  Serial.println(F("\n--- HLEDANI VSECH JEDNOTEK VE VOZU (SCAN) ---"));
+  uint8_t addrs[] = { 0x01, 0x25, 0x15, 0x17 };
+  const char* names[] = { "Motor SIMOS 2P (0x01)", "Imobilizer (0x25)", "Airbag (0x15)", "Pristrojova deska (0x17)" };
+  
+  for (uint8_t i = 0; i < 4; i++) {
+    Serial.print(F("Zkousim se pripojit k: "));
+    Serial.println(names[i]);
+    if (wakeKw1281(addrs[i])) {
+      Serial.print(F(">>> JEDNOTKA NALEZENA A ODPOVÍDÁ: "));
+      Serial.println(names[i]);
+      readIdentification();
+      sendBlock(0x06, NULL, 0); // End session
+      delay(500);
+    } else {
+      Serial.print(F("Bez odezvy: "));
+      Serial.println(names[i]);
+    }
+    delay(400);
+  }
+  Serial.println(F("--- SCAN DOKONCEN ---\n"));
 }
 
 void menu() {
   Serial.println();
   Serial.println(F("=================================================="));
-  Serial.println(F("Diagnostika Felicia K-line (ESP32-C3)"));
-  Serial.println(F("f=závady, c=smazat, i=identifikace, l=živá data, a=klapka 098, r=reset adaptací, k=akční členy, t=test linky, ?=menu"));
+  Serial.println(F("Diagnostika Felicia K-line (ESP32-C3 V0.3B)"));
+  Serial.println(F("f=závady, c=smazat, i=identifikace, l=živá data, a=klapka 098, r=reset adaptací, k=akční členy, s=scan všech ECU, t=test linky, ?=menu"));
   Serial.println(F("=================================================="));
 }
 
@@ -559,6 +688,7 @@ void loop() {
     else if (c == 'a' || c == 'A') basicSetting098();
     else if (c == 'r' || c == 'R') resetAdaptations();
     else if (c == 'k' || c == 'K') testActuators();
+    else if (c == 's' || c == 'S') scanAllEcus();
     else if (c == 't' || c == 'T') hardwareTest();
     else if (c == '?') menu();
   }
