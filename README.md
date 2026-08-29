@@ -1,59 +1,56 @@
-# Diagnostika Felicia 1.3 MPI Arduino
+# Diagnostika Felicia 1.3 MPI (K-Line / KW1281)
 
-Verze: **0.3**
+Verze: **V0.3B**
 
-Testovací diagnostika pro Škodu Felicia 1.3 MPI / SIMOS 2P přes K-line. Projekt má dvě části:
+Kompletní diagnostický systém pro vozy **Škoda Felicia 1.3 MPI (Siemens SIMOS 2P)** komunikující přes sběrnici K-line protokolem VAG KW1281.
 
-- Arduino firmware pro K-line komunikaci přes tranzistorový převodník BC547.
-- Windows aplikaci `FeliciaKLineDiagnostika.exe` s modernějším českým UI ve stylu VAG/VCDS.
+Projekt se skládá z:
+- **Windows aplikace (`FeliciaKLineDiagnostika.exe`):** Moderní české diagnostické rozhraní ve stylu VCDS / VAG s přehledem paměti závad, živými měřenými hodnotami, adaptacemi a testy akčních členů.
+- **ESP32-C3 Firmware (`arduino/Diagnostika_Felicia_KLine_ESP32/`):** Rychlý 32-bitový převodník s hardwarovým UART a USB-CDC komunikací.
+- **Arduino Nano / Uno Firmware (`arduino/Diagnostika_Felicia_KLine/`):** Klasická verze s knihovnou AltSoftSerial.
 
-## Ověřená konfigurace
+---
 
-- Arduino Nano / Uno 5 V
-- AltSoftSerial: RX = D8, TX = D9
-- USB Serial: 115200 baud
-- ECU: VAG/KW1281, adresa `0x01`
-- Ověřená jednotka: `047906030N`, `SIMOS 2P`, `7016`
+## ⚡ Podporovaný hardware
 
-## Funkce ve verzi 0.3
+### 1. ESP32-C3 (SuperMini / DevKit) - Doporučeno
+- **USB Serial:** 115200 baud (USB-CDC On Boot)
+- **K-Line RX:** GPIO 1 (vstup z napěťového děliče)
+- **K-Line TX:** GPIO 2 (výstup na bázi NPN tranzistoru)
+- **Indikační LED:** GPIO 8 (modrá LED bliká při vysílání/příjmu)
 
-- Čistý komunikační protokol mezi Arduinem a Windows aplikací přes řádky `APP_*`.
-- Viditelný surový log Arduino / ECU v aplikaci.
-- Automatické hledání COM portu.
-- Čtení paměti závad ECU.
-- Mazání paměti závad s potvrzením a historií před/po.
-- Živá data: otáčky, napětí baterie, úhel škrticí klapky.
-- Graf živých dat.
-- Český diagnostický report.
-- Rozšířená databáze běžných VAG/OBD závad.
+### 2. Arduino Nano / Uno (5 V)
+- **USB Serial:** 115200 baud
+- **K-Line RX:** Pin D8 (AltSoftSerial)
+- **K-Line TX:** Pin D9 (AltSoftSerial)
+- **Indikační LED:** Pin D13
 
-## Soubory
+---
 
-- `arduino/Diagnostika_Felicia_KLine/Diagnostika_Felicia_KLine.ino` - Arduino firmware.
-- `pc/FeliciaKLineDiagApp/FeliciaKLineDiagApp.cs` - zdroj Windows aplikace.
-- `VERSION` - číslo verze.
+## 🛠️ Funkce verze V0.3B
 
-## Knihovny
+1. **Paměť závad (Funkce 02):**
+   - Čtení chybových kódů ECU s českým překladem VAG/OBD.
+   - Mazání paměti závad (Funkce 05).
+2. **Živá měřená data (Funkce 08):**
+   - Otáčky motoru (RPM), napětí palubní sítě (V), úhel otevření klapky (°).
+   - Teplota chladicí kapaliny (°C), doba vstřiku (ms), napětí lambda sondy (V).
+3. **Konfigurace a servisní adaptace (Funkce 04 / 10):**
+   - **Základní nastavení škrticí klapky (098):** Kalibrace dorazů servomotoru V60 a snímače G69.
+   - **Vymazání adaptačních hodnot (Kanál 00):** Tovární reset korekcí směsi a volnoběhu z paměti RAM/EEPROM.
+   - **Test akčních členů (Funkce 03):** Spínání ventilu odvětrání nádrže N80, relé palivového čerpadla a servomotoru klapky.
+   - **Párování imobilizéru (Adresa 25 / Kanál 00).**
+4. **Detailní identifikace ECU (Funkce 01):**
+   - Číslo dílu VAG, typ systému (SIMOS 2P), verze softwaru a kódování.
+5. **Hardware a konektivita:**
+   - Automatická detekce a přehledné pojmenování COM portů.
+   - Tlačítko pro vzdálený HW reset mikrokontroléru.
+   - Světelná LED indikace komunikace na desce i v aplikaci.
 
-V Arduino IDE nainstaluj knihovnu:
+---
 
-- `AltSoftSerial`
+## 🚀 Spuštění
 
-Na Arduino Nano / Uno používá AltSoftSerial pevné piny:
-
-- RX = D8
-- TX = D9
-
-## Build Windows aplikace
-
-Na Windows lze aplikaci sestavit přes .NET Framework C# compiler:
-
-```powershell
-& 'C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe' /nologo /codepage:65001 /target:winexe /optimize+ /platform:anycpu /out:FeliciaKLineDiagnostika.exe /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll pc\FeliciaKLineDiagApp\FeliciaKLineDiagApp.cs
-```
-
-## Bezpečnost
-
-Program není ELM327 a nepoužívá AT příkazy. Adaptace a kódování jsou vypnuté. Jediný zapisovací příkaz je potvrzované smazání paměti závad ECU.
-
-Před mazáním závad si vždy ulož report nebo si opiš nalezené kódy.
+1. Připoj ESP32 nebo Arduino k PC přes USB a k autu přes OBD zásuvku (Pin 7 = K-Line, Pin 16 = +12V, Pin 4/5 = GND).
+2. Spusť [`FeliciaKLineDiagnostika.exe`](FeliciaKLineDiagnostika.exe).
+3. Vyber odpovídající COM port a klikni na **Připojit**.
