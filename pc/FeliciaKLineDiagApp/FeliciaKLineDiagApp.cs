@@ -85,10 +85,11 @@ namespace FeliciaKLineDiagApp
 
         public MainForm()
         {
-            Text = "FeliciaDiag V0.3B - Škoda Felicia 1.3 MPI Diagnostika & Konfigurace";
-            Size = new Size(1280, 860);
-            MinimumSize = new Size(1024, 700);
+            Text = "FeliciaDiag V0.5.1 - Škoda Felicia 1.3 MPI Diagnostika";
+            Size = new Size(1440, 960);
+            MinimumSize = new Size(1180, 760);
             StartPosition = FormStartPosition.CenterScreen;
+            WindowState = FormWindowState.Maximized;
             BackColor = Color.FromArgb(15, 23, 42);
 
             browser = new WebBrowser
@@ -204,13 +205,13 @@ namespace FeliciaKLineDiagApp
                         DtrEnable = true,
                         RtsEnable = false, // CRITICAL FOR ESP32: RTS=false allows CPU to run instead of bootloader reset!
                         Handshake = Handshake.None,
+                        Encoding = Encoding.UTF8,
                         ReadTimeout = 1500,
                         WriteTimeout = 1500,
                         ReadBufferSize = 16384,
                         WriteBufferSize = 16384
                     };
 
-                    port.DataReceived += Port_DataReceived;
                     port.Open();
                     try { port.DiscardInBuffer(); } catch { }
                     try { port.DiscardOutBuffer(); } catch { }
@@ -329,15 +330,31 @@ namespace FeliciaKLineDiagApp
             }
         }
 
+        private void StopReader()
+        {
+            isReading = false;
+            Thread thread = readThread;
+            readThread = null;
+
+            if (thread != null && thread != Thread.CurrentThread)
+            {
+                try
+                {
+                    if (thread.IsAlive) thread.Join(500);
+                }
+                catch { }
+            }
+        }
+
         public void Disconnect()
         {
+            StopReader();
             lock (portLock)
             {
                 try
                 {
                     if (port != null)
                     {
-                        port.DataReceived -= Port_DataReceived;
                         if (port.IsOpen)
                         {
                             port.DiscardInBuffer();
@@ -403,47 +420,6 @@ namespace FeliciaKLineDiagApp
             Js("setRxStats", "0", "0", "--", "--");
         }
 
-        private void Port_DataReceived(object sender, SerialDataReceivedEventArgs e)
-        {
-            try
-            {
-                lock (portLock)
-                {
-                    if (port == null || !port.IsOpen) return;
-                    string text = port.ReadExisting();
-                    if (string.IsNullOrEmpty(text)) return;
-                    totalBytes += text.Length;
-
-                    lock (rxBuffer)
-                    {
-                        rxBuffer.Append(text);
-                        string all = rxBuffer.ToString();
-                        int lastNl = all.LastIndexOf('\n');
-                        if (lastNl >= 0)
-                        {
-                            string full = all.Substring(0, lastNl);
-                            rxBuffer.Remove(0, lastNl + 1);
-
-                            string[] split = full.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.RemoveEmptyEntries);
-                            lock (lines)
-                            {
-                                foreach (string line in split)
-                                {
-                                    if (!string.IsNullOrEmpty(line))
-                                    {
-                                        totalLines++;
-                                        lastLine = line;
-                                        lines.Enqueue(line);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
-
         private void ProcessLines()
         {
             int count = 0;
@@ -495,6 +471,17 @@ namespace FeliciaKLineDiagApp
                 return;
             }
 
+            if (line.StartsWith("APP_LIVE_FIELD|"))
+            {
+                string[] p = line.Split('|');
+                if (p.Length >= 7)
+                {
+                    Js("setLiveField", p[1], p[2], p[3], p[4], p[5], p[6]);
+                    Status("Čtení měřicích bloků SIMOS 2P běží (vzorek #" + p[1] + ").", "good");
+                }
+                return;
+            }
+
             if (line.StartsWith("APP_LIVE|"))
             {
                 string[] p = line.Split('|');
@@ -524,28 +511,6 @@ namespace FeliciaKLineDiagApp
                     if (p[1] == "OK") { Status("Základní nastavení škrticí klapky proběhlo úspěšně (ADP OK)!", "good"); Js("setAdpResult", "OK"); }
                     else if (p[1] == "REFUSED") { Status("ECU odmítla základní nastavení klapky (zkontroluj teplotu motoru >80°C a pedál v klidu).", "bad"); Js("setAdpResult", "REFUSED"); }
                     else { Status("Chyba při základním nastavení klapky (" + p[1] + ").", "bad"); Js("setAdpResult", p[1]); }
-                }
-                return;
-            }
-
-            if (line.StartsWith("APP_RESET_ADP|"))
-            {
-                string[] p = line.Split('|');
-                if (p.Length >= 2)
-                {
-                    if (p[1] == "OK") { Status("Adaptační hodnoty byly úspěšně vymazány (Tovární reset RAM/EEPROM)!", "good"); Js("setResetResult", "OK"); }
-                    else { Status("ECU odmítla vymazání adaptací.", "bad"); Js("setResetResult", "REFUSED"); }
-                }
-                return;
-            }
-
-            if (line.StartsWith("APP_ACT|"))
-            {
-                string[] p = line.Split('|');
-                if (p.Length >= 2)
-                {
-                    if (p[1] == "RUNNING" || p[1] == "OK") { Status("Test akčních členů byl spuštěn na ECU.", "good"); Js("setActResult", "OK"); }
-                    else { Status("Test akčních členů selhal nebo byl odmítnut.", "bad"); Js("setActResult", "FAIL"); }
                 }
                 return;
             }
@@ -634,13 +599,13 @@ namespace FeliciaKLineDiagApp
 
         private void ClosePort()
         {
+            StopReader();
             lock (portLock)
             {
                 try
                 {
                     if (port != null)
                     {
-                        port.DataReceived -= Port_DataReceived;
                         if (port.IsOpen)
                         {
                             port.DiscardInBuffer();
@@ -686,19 +651,19 @@ namespace FeliciaKLineDiagApp
 <head>
 <meta http-equiv=""Content-Type"" content=""text/html; charset=utf-8"">
 <meta http-equiv=""X-UA-Compatible"" content=""IE=edge"">
-<title>FeliciaDiag V0.3B</title>
+<title>FeliciaDiag V0.5.1</title>
 <style>
 * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
-body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background: #0b1120; color: #f1f5f9; overflow: hidden; height: 100vh; font-size: 15px; }
+body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background: #0b1120; color: #f1f5f9; overflow: hidden; height: 100vh; font-size: 17px; }
 .app { display: flex; height: 100vh; width: 100vw; overflow: hidden; }
 
 /* LEVÝ NAVIGAČNÍ PANEL */
-.nav { width: 300px; background: #131d31; color: #eaf0f7; padding: 20px 16px; box-sizing: border-box; display: flex; flex-direction: column; border-right: 2px solid #1e293b; flex-shrink: 0; }
-.brand { font-size: 28px; font-weight: 800; color: #38bdf8; letter-spacing: -0.5px; }
-.sub { font-size: 14px; color: #94a3b8; margin-top: 4px; margin-bottom: 24px; font-weight: 500; }
+.nav { width: 330px; background: #131d31; color: #eaf0f7; padding: 22px 18px; box-sizing: border-box; display: flex; flex-direction: column; border-right: 2px solid #1e293b; flex-shrink: 0; }
+.brand { font-size: 31px; font-weight: 800; color: #38bdf8; letter-spacing: -0.5px; }
+.sub { font-size: 16px; color: #94a3b8; margin-top: 4px; margin-bottom: 24px; font-weight: 500; }
 .nav-group { margin-bottom: 18px; }
 .nav-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #64748b; font-weight: 700; margin-bottom: 8px; padding-left: 6px; }
-.nav button { width: 100%; margin: 5px 0; padding: 13px 16px; border: 1px solid #334155; background: #1e293b; color: #f8fafc; text-align: left; border-radius: 8px; cursor: pointer; font-size: 15px; font-weight: 600; font-family: inherit; transition: all 0.15s ease; outline: none; }
+.nav button { width: 100%; margin: 6px 0; padding: 15px 18px; border: 1px solid #334155; background: #1e293b; color: #f8fafc; text-align: left; border-radius: 8px; cursor: pointer; font-size: 17px; font-weight: 600; font-family: inherit; transition: all 0.15s ease; outline: none; }
 .nav button:hover { background: #2563eb; border-color: #3b82f6; color: #ffffff; }
 .nav button.active { background: #2563eb; border-color: #60a5fa; color: #ffffff; box-shadow: 0 4px 12px rgba(37,99,235,0.35); }
 .nav-icon { margin-right: 10px; font-size: 18px; display: inline-block; vertical-align: middle; }
@@ -711,9 +676,9 @@ body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background
 
 /* HLAVNÍ PRAVÁ ČÁST */
 .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: #090e17; height: 100vh; }
-.top { background: #111a2e; border-bottom: 2px solid #1e293b; display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; flex-shrink: 0; }
-.top-title { font-size: 20px; font-weight: 800; color: #f8fafc; }
-.top-sub { font-size: 13px; color: #94a3b8; margin-top: 2px; }
+.top { background: #111a2e; border-bottom: 2px solid #1e293b; display: flex; align-items: center; justify-content: space-between; padding: 17px 28px; flex-shrink: 0; }
+.top-title { font-size: 23px; font-weight: 800; color: #f8fafc; }
+.top-sub { font-size: 15px; color: #94a3b8; margin-top: 2px; }
 
 .port-bar { display: flex; align-items: center; gap: 10px; background: #1e293b; padding: 8px 14px; border-radius: 8px; border: 1px solid #334155; }
 .port-bar label { font-size: 13px; font-weight: 700; color: #cbd5e1; }
@@ -729,7 +694,7 @@ body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background
 .body { padding: 20px; }
 
 /* TLAČÍTKA A OVLÁDACÍ PRVKY */
-.btn { padding: 11px 18px; margin: 4px; border: 1px solid #334155; background: #1e293b; color: #f1f5f9; border-radius: 6px; cursor: pointer; font-size: 15px; font-weight: 700; font-family: inherit; transition: all 0.15s ease; display: inline-block; vertical-align: middle; line-height: normal; text-align: center; white-space: nowrap; }
+.btn { padding: 13px 20px; margin: 4px; border: 1px solid #334155; background: #1e293b; color: #f1f5f9; border-radius: 6px; cursor: pointer; font-size: 17px; font-weight: 700; font-family: inherit; transition: all 0.15s ease; display: inline-block; vertical-align: middle; line-height: normal; text-align: center; white-space: nowrap; }
 .btn:hover { background: #334155; color: #ffffff; border-color: #475569; }
 .btn-lg { padding: 14px 22px; font-size: 15px; border-radius: 8px; }
 .btn-primary { background: #2563eb; color: #ffffff; border-color: #1d4ed8; }
@@ -758,6 +723,13 @@ body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background
 .live-title { font-size: 16px; font-weight: 700; color: #f8fafc; display: flex; align-items: center; gap: 8px; }
 .live-meta { font-size: 13px; color: #94a3b8; margin-top: 3px; }
 .live-val { font-size: 22px; font-weight: 800; color: #38bdf8; font-family: Consolas, monospace; min-width: 150px; text-align: right; }
+.live-group { background: #111a2e; border: 1px solid #1e293b; border-radius: 8px; margin-bottom: 14px; overflow: hidden; }
+.live-group-title { padding: 12px 16px; background: #172238; color: #f8fafc; font-size: 17px; font-weight: 700; border-bottom: 1px solid #1e293b; }
+.live-row { display: flex; justify-content: space-between; gap: 18px; padding: 11px 16px; border-bottom: 1px solid #1e293b; }
+.live-row:last-child { border-bottom: none; }
+.live-row-label { color: #cbd5e1; font-size: 16px; font-weight: 600; }
+.live-row-value { color: #38bdf8; font-family: Consolas, monospace; font-size: 17px; font-weight: 700; text-align: right; }
+.legacy-live { display: none; }
 
 .badge { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 700; }
 .badge-verified { background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid #059669; }
@@ -781,8 +753,8 @@ body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background
 
 /* SPODNÍ FIXNÍ KOMUNIKAČNÍ ZÁZNAMNÍK */
 .bottom-log { flex-shrink: 0; background: #111a2e; border-top: 2px solid #1e293b; display: flex; flex-direction: column; }
-.bottom-log-head { padding: 8px 18px; font-size: 14px; font-weight: 700; background: #172238; color: #f8fafc; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1e293b; }
-.log-fixed { height: 160px; margin: 0; background: #05080e; color: #38bdf8; font-family: Consolas, monospace; font-size: 13px; overflow-y: auto; padding: 10px 16px; white-space: pre-wrap; line-height: 1.45; border: none; border-radius: 0; }
+.bottom-log-head { padding: 11px 20px; font-size: 16px; font-weight: 700; background: #172238; color: #f8fafc; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1e293b; }
+.log-fixed { height: 230px; margin: 0; background: #05080e; color: #38bdf8; font-family: Consolas, monospace; font-size: 16px; overflow-y: auto; padding: 14px 18px; white-space: pre-wrap; line-height: 1.55; border: none; border-radius: 0; }
 </style>
 </head>
 <body>
@@ -790,7 +762,7 @@ body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background
     <!-- LEVÁ NAVIGACE -->
     <div class=""nav"">
         <div class=""brand"">FeliciaDiag</div>
-        <div class=""sub"">Verze V0.3B / ESP32 & Arduino</div>
+        <div class=""sub"">Verze V0.5.1 / ESP32 & Arduino</div>
         
         <div class=""nav-group"">
             <div class=""nav-title"">Diagnostika</div>
@@ -864,7 +836,7 @@ body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background
                             </div>
                             <div style=""flex: 1; min-width: 260px; background: #080d18; padding: 16px; border-radius: 8px; border: 1px solid #1e293b;"">
                                 <b style=""color: #38bdf8; font-size: 16px;"">&#9881; 2. Konfigurace a adaptace</b>
-                                <p style=""margin: 8px 0 0 0;"">Lze provést kalibraci škrticí klapky (098), reset adaptačních hodnot (kanál 00), test akčních členů i přizpůsobení imobilizéru.</p>
+                                <p style=""margin: 8px 0 0 0;"">K dispozici je zdokumentované základní nastavení škrticí klapky (098). Ostatní zápisové úkony se nezobrazují, dokud nebudou pro tuto jednotku bezpečně ověřené.</p>
                             </div>
                             <div style=""flex: 1; min-width: 260px; background: #080d18; padding: 16px; border-radius: 8px; border: 1px solid #1e293b;"">
                                 <b style=""color: #38bdf8; font-size: 16px;"">&#128220; 3. Záznamník komunikace</b>
@@ -904,6 +876,12 @@ body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background
                         </div>
                     </div>
                     <div class=""body"">
+                        <div id=""liveStatusBox"" style=""margin-bottom: 18px;"">
+                            <div class=""empty-box"" style=""padding: 14px 18px;"">ℹ️ Čtou se pouze zdokumentované měřicí skupiny řídicí jednotky <b>Siemens SIMOS 2P</b>. Žádné hodnoty se do ECU nezapisují.</div>
+                        </div>
+                        <div id=""liveGroups""></div>
+                    </div>
+                    <div class=""body legacy-live"">
                         <div id=""liveStatusBox"" style=""margin-bottom: 18px;"">
                             <div class=""empty-box"" style=""padding: 14px 18px;"">ℹ️ Pro zahájení kontinuálního čtení hodnot z motoru klikněte na <b>Spustit čtení živých dat</b>.</div>
                         </div>
@@ -1072,9 +1050,34 @@ body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background
             <div id=""config"" class=""view"" style=""display:none"">
                 <div class=""panel"">
                     <div class=""head"">
-                        <span>Konfigurace, adaptace a servisní funkce jednotky SIMOS 2P</span>
+                        <span>Ověřené servisní funkce jednotky SIMOS 2P</span>
                     </div>
                     <div class=""body"">
+                        <div id=""cfgStatusBox"" style=""margin-bottom: 18px;"">
+                            <div class=""empty-box"" style=""padding: 14px 18px;"">ℹ️ Zobrazené úkony odpovídají dílenské příručce Felicia 1.3 MPI se SIMOS 2P.</div>
+                        </div>
+
+                        <div class=""cfg-card"">
+                            <div class=""cfg-head"">
+                                <span>&#9881; Základní nastavení škrticí klapky — skupina 098</span>
+                                <button class=""btn btn-warning"" onclick=""runThrottleAdaptation()""><span class=""btn-icon"">&#9654;</span>Spustit nastavení 098</button>
+                            </div>
+                            <div class=""cfg-desc"">
+                                Zdokumentovaný servisní postup pro seřízení pohonu škrticí klapky po jeho vyčištění nebo opravě. Funkce čte výsledek přímo z ECU; při odmítnutí se do nastavení nic nedopisuje.
+                            </div>
+                            <div class=""cfg-cond"">
+                                <b>Než začneš:</b> motor vypnutý, zapalování zapnuté, pedál plynu volný, motor zahřátý nad 80 °C a paměť závad bez aktuálních chyb. Po úspěchu počkej 20 s, ukonči komunikaci a vypni zapalování alespoň na 30 s.
+                            </div>
+                        </div>
+
+                        <div class=""cfg-card"">
+                            <div class=""cfg-head""><span>&#128274; Záměrně nenabízené funkce</span></div>
+                            <div class=""cfg-desc"">
+                                Párování imobilizéru patří samostatné jednotce 25 a vyžaduje správné přihlášení. Kódování výbavy ani hromadné mazání adaptací tato motorová komunikace nemají spolehlivě ověřené. Test akčních členů také není v této verzi nabízen, dokud nebude ověřena kompletní bezpečná sekvence pro SIMOS 2P.
+                            </div>
+                        </div>
+                    </div>
+                    <div class=""body legacy-live"">
 
                         <div id=""cfgStatusBox"" style=""margin-bottom: 18px;"">
                             <div class=""empty-box"" style=""padding: 14px 18px;"">ℹ️ Vyberte požadovanou servisní operaci níže. Ujistěte se, že je zapnuté zapalování.</div>
@@ -1196,7 +1199,7 @@ body { margin: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background
                     <div class=""body"">
                         <div style=""background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 14px 18px; margin-bottom: 20px; line-height: 1.5; font-size: 14px;"">
                             <b style=""color: #38bdf8;"">ℹ️ Podpora pro ESP32 a Arduino:</b><br>
-                            - <b>ESP32-C3:</b> Standardní rychlost <b>115200 baud</b>, RX = GPIO 1, TX = GPIO 2.<br>
+                            - <b>ESP32-C3:</b> Standardní rychlost <b>115200 baud</b>, RX = GPIO 5, TX = GPIO 4.<br>
                             - <b>Arduino Nano / Uno:</b> Rychlost <b>115200 baud</b>, AltSoftSerial RX = D8, TX = D9.<br>
                             - Pokud se zařízení nechce spojit, klikněte na <b>HW Reset zařízení</b> níže pro restart procesoru.
                         </div>
@@ -1434,71 +1437,134 @@ function setAdpResult(res) {
     }
 }
 
-function runResetAdaptations() {
-    if (confirm('Opravdu chcete vymazat adaptační hodnoty řídicí jednotky (Reset paměti RAM/EEPROM)?\n\nTento krok vrátí korekce směsi a polohy klapky do továrního stavu.')) {
-        var box = id('cfgStatusBox');
-        if (box) {
-            box.innerHTML = '<div class=""busy"" style=""padding: 14px 18px; border-radius: 8px;"">⏳ <b>Odesílám příkaz pro vymazání adaptačních hodnot (Kanál 00)...</b></div>';
-        }
-        cmd('r');
-    }
-}
-
-function setResetResult(res) {
-    var box = id('cfgStatusBox');
-    if (!box) return;
-    if (res == 'OK') {
-        box.innerHTML = '<div class=""ok-box"" style=""padding: 14px 18px;""><span style=""font-size:24px;"">&#9989;</span> <div><b>Adaptační hodnoty byly úspěšně vymazány!</b><div style=""font-size:13px;color:#a7f3d0;margin-top:3px;"">Doporučujeme vypnout zapalování na 30 sekund a následně provést základní nastavení klapky (098).</div></div></div>';
-    } else {
-        box.innerHTML = '<div class=""dtc""><div class=""dtc-code"">&#9888; Vymazání adaptací bylo odmítnuto řídicí jednotkou.</div></div>';
-    }
-}
-
-function runActuatorTests() {
-    if (confirm('Spustit test akčních členů (Funkce 03)?\n\nECU bude postupně spínat ventil N80, relé čerpadla a servomotor klapky.')) {
-        var box = id('cfgStatusBox');
-        if (box) {
-            box.innerHTML = '<div class=""busy"" style=""padding: 14px 18px; border-radius: 8px;"">⏳ <b>Spouštím test akčních členů (Funkce 03)...</b><br>Poslouchejte cvakání ventilů a servomotoru pod kapotou.</div>';
-        }
-        cmd('k');
-    }
-}
-
-function setActResult(res) {
-    var box = id('cfgStatusBox');
-    if (!box) return;
-    if (res == 'OK') {
-        box.innerHTML = '<div class=""ok-box"" style=""padding: 14px 18px;""><span style=""font-size:24px;"">&#9989;</span> <div><b>Test akčních členů byl spuštěn!</b><div style=""font-size:13px;color:#a7f3d0;margin-top:3px;"">Komponenty byly aktivovány řídicí jednotkou.</div></div></div>';
-    } else {
-        box.innerHTML = '<div class=""dtc""><div class=""dtc-code"">&#9888; Test akčních členů selhal nebo nebyl jednotkou povolen.</div></div>';
-    }
-}
-
-function runImmoAdaptation() {
-    if (confirm('Spustit přizpůsobení řídicí jednotky motoru k imobilizéru?\n\nTento úkon synchronizuje kód imobilizéru s motorovou jednotkou SIMOS 2P.')) {
-        cmd('r');
-    }
-}
-
 function startLiveData() {
     var box = id('liveStatusBox');
     if (box) {
-        box.innerHTML = '<div class=""busy"" style=""padding: 14px 18px; border-radius: 8px;"">⏳ <b>Inicializuji KW1281 a spouštím kontinuální čtení živých dat (Funkce 08)...</b><br>Vyčkejte 2-3 sekundy na navázání komunikace s ECU.</div>';
+        box.innerHTML = '<div class=""busy"" style=""padding: 14px 18px; border-radius: 8px;"">⏳ <b>Inicializuji KW1281 a načítám měřicí bloky SIMOS 2P...</b><br>První hodnoty se zobrazí během několika sekund.</div>';
     }
+    var groups = id('liveGroups');
+    if (groups) groups.innerHTML = '';
     cmd('l');
 }
 
-function setLive(sample, rpm, volt, thr, temp, inj, lambda) {
-    if (id('live_rpm')) id('live_rpm').textContent = (rpm !== undefined && rpm !== '') ? (rpm + ' ot/min') : '--';
-    if (id('live_volt')) id('live_volt').textContent = (volt !== undefined && volt !== '') ? (volt + ' V') : '--';
-    if (id('live_thr')) id('live_thr').textContent = (thr !== undefined && thr !== '') ? (thr + ' °') : '--';
-    if (id('live_temp')) id('live_temp').textContent = (temp && temp !== '--') ? (temp + ' °C') : '--';
-    if (id('live_inj')) id('live_inj').textContent = (inj && inj !== '--') ? (inj + ' ms') : '--';
-    if (id('live_lambda')) id('live_lambda').textContent = (lambda && lambda !== '--') ? (lambda + ' V') : '--';
-    
+var simosGroups = {
+    '001': 'Základní hodnoty motoru', '003': 'Volnoběh a škrticí klapka',
+    '005': 'Napájení a teploty', '007': 'Provoz škrticí klapky',
+    '008': 'Stabilizace volnoběhu', '009': 'Spotřeba vzduchu při volnoběhu',
+    '010': 'Lambda regulace a aktivní uhlí', '011': 'Vstřikování a lambda korekce',
+    '012': 'Hodnoty lambda regulace', '015': 'Regulace klepání — válce 1/4',
+    '016': 'Regulace klepání — válce 2/3', '017': 'Signály snímačů klepání',
+    '019': 'Provozní stav klimatizace', '020': 'Stav lambda regulace',
+    '021': 'Nastavení škrticí klapky', '097': 'Napětí potenciometrů klapky',
+    '099': 'Kontrola lambda regulace'
+};
+
+var simosFields = {
+    '001_1': 'Otáčky motoru (G28)', '001_2': 'Teplota chladicí kapaliny (G62)', '001_3': 'Napětí lambda sondy (G39)', '001_4': 'Stav lambda regulace',
+    '003_1': 'Otáčky motoru', '003_2': 'Požadované volnoběžné otáčky', '003_3': 'Úhel škrticí klapky (G69)', '003_4': 'Střída ovládání klapky (V60)',
+    '005_1': 'Otáčky motoru', '005_2': 'Napětí ECU / akumulátoru', '005_3': 'Teplota chladicí kapaliny', '005_4': 'Teplota nasávaného vzduchu (G42)',
+    '007_1': 'Úhel škrticí klapky', '007_4': 'Provozní stav klapky',
+    '008_1': 'Otáčky motoru', '008_2': 'Požadované volnoběžné otáčky', '008_3': 'Regulátor volnoběhu', '008_4': 'Stav klapky',
+    '009_1': 'Regulátor volnoběhu', '009_2': 'Spotřeba vzduchu', '009_3': 'Teplota chladicí kapaliny', '009_4': 'Otáčky motoru',
+    '010_1': 'Lambda regulace', '010_2': 'Napětí lambda sondy', '010_3': 'Střída ventilu aktivního uhlí', '010_4': 'Lambda korekce při aktivním uhlí',
+    '011_1': 'Doba vstřiku', '011_2': 'Lambda hodnota pro volnoběh', '011_3': 'Lambda hodnota při částečném zatížení', '011_4': 'Stav ventilu aktivního uhlí',
+    '012_1': 'Otáčky motoru', '012_3': 'Lambda regulace', '012_4': 'Napětí lambda sondy',
+    '015_1': 'Otáčky motoru', '015_3': 'Omezení předstihu klepáním — válce 1/4', '015_4': 'Omezení předstihu klepáním — válce 2/3',
+    '016_1': 'Otáčky motoru', '016_3': 'Omezení předstihu klepáním — válce 2/3', '016_4': 'Omezení předstihu klepáním — válce 1/4',
+    '017_1': 'Signál snímače klepání', '017_2': 'Signál snímače klepání', '017_3': 'Signál snímače klepání', '017_4': 'Signál snímače klepání',
+    '019_1': 'Otáčky motoru', '019_3': 'Kompresor klimatizace', '019_4': 'Stav klimatizace',
+    '020_1': 'Otáčky motoru', '020_3': 'Teplota chladicí kapaliny', '020_4': 'Stav lambda regulace',
+    '021_1': 'Stav ovládání škrticí klapky', '021_2': 'Minimální poloha nastavovače', '021_3': 'Nouzová poloha nastavovače', '021_4': 'Maximální poloha nastavovače',
+    '097_1': 'Potenciometr klapky — dolní mez', '097_2': 'Potenciometr nastavovače — dolní mez', '097_3': 'Potenciometr klapky — horní mez', '097_4': 'Potenciometr nastavovače — horní mez',
+    '099_1': 'Otáčky motoru', '099_2': 'Teplota chladicí kapaliny', '099_3': 'Lambda regulace', '099_4': 'Stav lambda regulace'
+};
+
+function padGroup(group) {
+    var result = String(parseInt(group, 10));
+    while (result.length < 3) result = '0' + result;
+    return result;
+}
+
+function fmt(value, decimals) { return Number(value).toFixed(decimals); }
+
+function decodeKwp1281(formula, a, b) {
+    formula = Number(formula); a = Number(a); b = Number(b);
+    var product = a * b;
+    switch (formula) {
+        case 1: return fmt(product * 0.2, 0) + ' ot/min';
+        case 2: return fmt(product * 0.002, 1) + ' %';
+        case 3: return fmt(product * 0.002, 1) + ' °';
+        case 4: return fmt(Math.abs(b - 127) * 0.01 * a, 1) + (b > 127 ? ' ° po HÚ' : ' ° před HÚ');
+        case 5: return fmt(product * 0.1 - a * 10, 1) + ' °C';
+        case 6: case 21: return fmt(product * 0.001, 3) + ' V';
+        case 7: return fmt(product * 0.01, 1) + ' km/h';
+        case 8: return fmt(product * 0.1, 1);
+        case 9: return fmt((b - 127) * 0.02 * a, 1) + ' °';
+        case 10: return b === 0 ? 'studený' : 'zahřátý';
+        case 11: return fmt(1 + a * (b - 128) * 0.0001, 3) + ' λ';
+        case 12: return fmt(product * 0.001, 3) + ' Ω';
+        case 13: return fmt((b - 127) * 0.001 * a, 3) + ' mm';
+        case 14: return fmt(product * 0.005, 3) + ' bar';
+        case 15: case 22: return fmt(product * 0.01, 2) + ' ms';
+        case 16: return 'stav 0x' + a.toString(16).toUpperCase() + ' / 0x' + b.toString(16).toUpperCase();
+        case 17: return String.fromCharCode(a) + String.fromCharCode(b);
+        case 18: return fmt(product * 0.04, 1) + ' mbar';
+        case 19: return fmt(product * 0.01, 2) + ' l';
+        case 20: return fmt(a * (b - 128) / 128, 1) + ' %';
+        case 23: return fmt(a * b / 256, 1) + ' %';
+        case 24: return fmt(product * 0.001, 3) + ' A';
+        case 25: return fmt(((b * 256) + a) / 182, 1) + ' g/h';
+        case 26: return (b - a) + ' °C';
+        case 27: return fmt(Math.abs(b - 128) * 0.01 * a, 1) + (b < 128 ? ' ° po HÚ' : ' ° před HÚ');
+        case 31: return fmt(a * b / 2560, 1) + ' °C';
+        case 32: return (b > 128 ? b - 256 : b).toString();
+        case 33: return fmt(a === 0 ? 100 * b : 100 * b / a, 1) + ' %';
+        case 35: return fmt(product * 0.01, 2) + ' l/h';
+        case 39: return fmt(a * b / 256, 1) + ' mg/h';
+        case 47: return ((b - 128) * a) + ' ms';
+        case 48: case 54: return String(a * 256 + b);
+        case 49: return fmt(a * b / 4, 1) + ' mg/h';
+        case 53: return fmt((b - 128) * 1.4222 + a * 0.006, 2) + ' g/s';
+        case 60: return fmt((a * 256 + b) * 0.01, 2) + ' s';
+        default: return 'surová A=' + a + ', B=' + b + ' (formát ' + formula + ')';
+    }
+}
+
+function setLiveField(sample, group, cell, formula, a, b) {
+    var groupCode = padGroup(group);
+    var key = groupCode + '_' + cell;
+    var groupId = 'live_group_' + groupCode;
+    var groupBox = id(groupId);
+    if (!groupBox) {
+        groupBox = document.createElement('div');
+        groupBox.className = 'live-group';
+        groupBox.id = groupId;
+        var title = document.createElement('div');
+        title.className = 'live-group-title';
+        title.textContent = 'Skupina ' + groupCode + ' — ' + (simosGroups[groupCode] || 'měřené hodnoty ECU');
+        groupBox.appendChild(title);
+        id('liveGroups').appendChild(groupBox);
+    }
+    var rowId = groupId + '_cell_' + cell;
+    var row = id(rowId);
+    if (!row) {
+        row = document.createElement('div');
+        row.className = 'live-row';
+        row.id = rowId;
+        var label = document.createElement('div');
+        label.className = 'live-row-label';
+        label.textContent = simosFields[key] || ('Pole ' + cell + ' (skupina ' + groupCode + ')');
+        var value = document.createElement('div');
+        value.className = 'live-row-value';
+        value.id = rowId + '_value';
+        row.appendChild(label);
+        row.appendChild(value);
+        groupBox.appendChild(row);
+    }
+    id(rowId + '_value').textContent = decodeKwp1281(formula, a, b);
     var box = id('liveStatusBox');
     if (box) {
-        box.innerHTML = '<div class=""ok-box"" style=""padding: 12px 18px;""><span style=""font-size:22px;"">🔄</span> <div><b>Aktivní přenos živých dat z ECU!</b> (přijat vzorek #' + sample + ')</div></div>';
+        box.innerHTML = '<div class=""ok-box"" style=""padding: 12px 18px;""><span style=""font-size:22px;"">🔄</span> <div><b>Čtou se měřicí bloky SIMOS 2P.</b> Přijat vzorek #' + sample + '.</div></div>';
     }
 }
 

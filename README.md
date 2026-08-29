@@ -15,8 +15,8 @@ Projekt se skládá z:
 
 ### 1. ESP32-C3 (SuperMini / DevKit) - Doporučeno
 - **USB Serial:** 115200 baud (USB-CDC On Boot)
-- **K-Line RX:** GPIO 1 (vstup z napěťového děliče)
-- **K-Line TX:** GPIO 2 (výstup na bázi NPN tranzistoru)
+- **K-Line RX:** GPIO 5 (vstup z napěťového děliče)
+- **K-Line TX:** GPIO 4 (výstup na bázi NPN tranzistoru)
 - **Indikační LED:** GPIO 8 (modrá LED bliká při vysílání/příjmu)
 
 ### 2. Arduino Nano / Uno (5 V)

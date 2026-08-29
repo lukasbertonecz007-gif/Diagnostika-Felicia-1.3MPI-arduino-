@@ -12,3 +12,15 @@
 # Temporary / OS files
 .DS_Store
 Thumbs.db
+
+# Locally generated releases and ESP32 compiler cache. Keep only the current
+# distributable files that are explicitly whitelisted below.
+/vydani/
+/arduino/Diagnostika_Felicia_KLine_ESP32/build/
+/versions/*
+!/versions/FeliciaKLineDiagnostika-0.5.1-win-x64/
+/versions/FeliciaKLineDiagnostika-0.5.1-win-x64/*
+!/versions/FeliciaKLineDiagnostika-0.5.1-win-x64/FeliciaKLineDiagApp.exe
+!/versions/FeliciaKLineFirmware-0.5.0-esp32c3/
+/versions/FeliciaKLineFirmware-0.5.0-esp32c3/*
+!/versions/FeliciaKLineFirmware-0.5.0-esp32c3/*.bin

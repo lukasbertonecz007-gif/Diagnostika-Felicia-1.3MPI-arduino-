@@ -1,6 +1,6 @@
 /*
   Diagnostika_Felicia_KLine_ESP32.ino
-  Verze: 0.4 (ESP32-C3 Production)
+  Verze: 0.5.0 (ESP32-C3, měřicí bloky SIMOS 2P)
 
   Kompletní diagnostický firmware pro Škoda Felicia 1.3 MPI (Siemens SIMOS 2P)
   s protokolem KW1281 / K-line na ESP32-C3.
@@ -18,9 +18,11 @@
 
 #include <Arduino.h>
 
-// Piny K-Linky (výchozí pro ESP32-C3 SuperMini: RX=20, TX=21, nebo RX=1, TX=2)
-uint8_t klineRxPin = 20;
-uint8_t klineTxPin = 21;
+// Skutečné zapojení tohoto K-line převodníku: RX=GPIO 5, TX=GPIO 4.
+// Piny se za běhu nehledají ani nemění: autodetekce vytvářela aktivní pulzy
+// na více GPIO a mohla vybrat jinou než skutečně zapojenou dvojici.
+const uint8_t KLINE_RX_PIN = 5;
+const uint8_t KLINE_TX_PIN = 4;
 
 // Vestavěná indikační LED na ESP32-C3 (SuperMini = GPIO 8, aktivní v LOW)
 #ifndef LED_PIN
@@ -76,6 +78,7 @@ const uint8_t KWP_GROUP_DATA = 0xE7;
 
 HardwareSerial kline(1);
 uint8_t kwSeq = 0;
+const bool VERBOSE_KW1281_LOG = false;
 
 void printHexByte(uint8_t b) {
   if (b < 0x10) Serial.print('0');
@@ -129,11 +132,13 @@ void sendRaw(uint8_t b) {
 
 void sendComplement(uint8_t b) {
   uint8_t c = b ^ 0xFF;
-  Serial.print(F("KW1281 ACK complement 0x"));
-  printHexByte(b);
-  Serial.print(F(" -> 0x"));
-  printHexByte(c);
-  Serial.println();
+  if (VERBOSE_KW1281_LOG) {
+    Serial.print(F("KW1281 ACK complement 0x"));
+    printHexByte(b);
+    Serial.print(F(" -> 0x"));
+    printHexByte(c);
+    Serial.println();
+  }
   sendRaw(c);
 }
 
@@ -147,19 +152,23 @@ bool readKwByte(uint8_t *out, uint16_t timeoutMs, bool ack) {
     return false;
   }
   *out = (uint8_t)b;
-  Serial.print(F("RX: 0x"));
-  printHexByte(*out);
-  Serial.print(F(" DEC: "));
-  Serial.println(*out, DEC);
+  if (VERBOSE_KW1281_LOG) {
+    Serial.print(F("RX: 0x"));
+    printHexByte(*out);
+    Serial.print(F(" DEC: "));
+    Serial.println(*out, DEC);
+  }
   if (ack) sendComplement(*out);
   return true;
 }
 
 bool sendKwByte(uint8_t b, bool waitComplement) {
-  Serial.print(F("TX: 0x"));
-  printHexByte(b);
-  Serial.print(F(" DEC: "));
-  Serial.println(b, DEC);
+  if (VERBOSE_KW1281_LOG) {
+    Serial.print(F("TX: 0x"));
+    printHexByte(b);
+    Serial.print(F(" DEC: "));
+    Serial.println(b, DEC);
+  }
   sendRaw(b);
   if (!waitComplement) return true;
   int c = readByteWithTimeout(COMPLEMENT_TIMEOUT_MS);
@@ -181,11 +190,13 @@ bool sendBlock(uint8_t type, const uint8_t *data, uint8_t dataLen) {
   delay(12);
   uint8_t len = 3 + dataLen;
   uint8_t seq = kwSeq + 1;
-  Serial.print(F("KW1281 sending block seq=0x"));
-  printHexByte(seq);
-  Serial.print(F(" type=0x"));
-  printHexByte(type);
-  Serial.println();
+  if (VERBOSE_KW1281_LOG) {
+    Serial.print(F("KW1281 sending block seq=0x"));
+    printHexByte(seq);
+    Serial.print(F(" type=0x"));
+    printHexByte(type);
+    Serial.println();
+  }
   if (!sendKwByte(len, true)) return false;
   if (!sendKwByte(seq, true)) return false;
   if (!sendKwByte(type, true)) return false;
@@ -224,23 +235,21 @@ bool readBlock(uint8_t *type, uint8_t *data, uint8_t *dataLen, uint16_t firstTim
   uint8_t endByte = 0;
   if (!readKwByte(&endByte, BYTE_TIMEOUT_MS, false)) return false;
   if (endByte != 0x03) return false;
-  printFrame("KW1281 DATA", data, *dataLen);
+  if (VERBOSE_KW1281_LOG) printFrame("KW1281 DATA", data, *dataLen);
   return true;
 }
 
 void stopKLineSerialForBitBang() {
   kline.end();
   delay(20);
-  pinMode(klineRxPin, INPUT);
-  pinMode(klineTxPin, OUTPUT);
-  digitalWrite(klineTxPin, HIGH);
+  pinMode(KLINE_RX_PIN, INPUT);
+  pinMode(KLINE_TX_PIN, OUTPUT);
+  digitalWrite(KLINE_TX_PIN, HIGH);
 }
 
-unsigned long currentKLineBaud = 10400; // SIMOS 2P standard is 10400 or 9600
-
-void startKLineSerial(unsigned long baud) {
-  currentKLineBaud = baud;
-  kline.begin(baud, SERIAL_8N1, klineRxPin, klineTxPin);
+void startKLineSerial() {
+  // Stejný přenosový režim jako ve funkční variantě pro Arduino Nano.
+  kline.begin(KW1281_BAUD, SERIAL_8N1, KLINE_RX_PIN, KLINE_TX_PIN);
   delay(AFTER_SERIAL_SWITCH_MS);
 }
 
@@ -248,78 +257,36 @@ void send5BaudByte(uint8_t b) {
   Serial.print(F("sending 5 baud init byte 0x"));
   printHexByte(b);
   Serial.println();
-  
-  // Parita pro KW1281: 7 datových bitů + 1 lichá parita (odd parity)
-  uint8_t ones = 0;
-  for (uint8_t bit = 0; bit < 7; bit++) {
-    if (b & (1 << bit)) ones++;
-  }
-  bool parityOdd = ((ones % 2) == 0); // Pokud je počet 1 sudý, paritní bit musí být 1 pro lichý součet
-  
-  digitalWrite(klineTxPin, HIGH);
+  digitalWrite(KLINE_TX_PIN, HIGH);
   delay(SLOW_IDLE_BEFORE_MS);
-  
-  // Start bit (LOW)
-  digitalWrite(klineTxPin, LOW);
+  digitalWrite(KLINE_TX_PIN, LOW);
   delay(SLOW_BIT_MS);
-  
-  // 7 datových bitů (LSB first)
-  for (uint8_t bit = 0; bit < 7; bit++) {
-    bool bitVal = (b & (1 << bit)) != 0;
-    digitalWrite(klineTxPin, bitVal ? HIGH : LOW);
+  for (uint8_t bit = 0; bit < 8; bit++) {
+    bool one = (b & (1 << bit)) != 0;
+    digitalWrite(KLINE_TX_PIN, one ? HIGH : LOW);
     delay(SLOW_BIT_MS);
   }
-  
-  // 1 paritní bit (Odd)
-  digitalWrite(klineTxPin, parityOdd ? HIGH : LOW);
-  delay(SLOW_BIT_MS);
-  
-  // Stop bit (HIGH)
-  digitalWrite(klineTxPin, HIGH);
+  digitalWrite(KLINE_TX_PIN, HIGH);
   delay(SLOW_BIT_MS);
 }
 
-bool wakeKw1281(uint8_t ecuAddr = VAG_ENGINE_ADDR) {
-  Serial.print(F("starting slow init for ECU address 0x"));
-  printHexByte(ecuAddr);
-  Serial.print(F(" on pins RX="));
-  Serial.print(klineRxPin);
-  Serial.print(F(", TX="));
-  Serial.println(klineTxPin);
+bool wakeKw1281() {
+  Serial.println(F("starting slow init"));
   kwSeq = 0;
-  
   stopKLineSerialForBitBang();
-  
-  // Zkontrolujeme, zda je linka v klidu HIGH (musí mít 12V pullup z auta)
-  if (digitalRead(klineRxPin) == LOW) {
-    Serial.println(F("VAROVANI: K-linka je v LOW uz pred inicializaci! Chybí +12V na pinu 16 OBD nebo je linka zkratovana na kostru."));
-  }
-  
-  send5BaudByte(ecuAddr);
-  
-  // Okamžitě přepneme na HW UART (9600 baud - standard pro Felicia SIMOS 2P)
-  Serial.println(F("switching to 9600 baud UART"));
-  startKLineSerial(9600);
-  
-  Serial.println(F("waiting for ECU response (Sync byte 0x55)..."));
+  send5BaudByte(VAG_ENGINE_ADDR);
+  Serial.println(F("switching to 9600 baud"));
+  startKLineSerial();
+  Serial.println(F("waiting for ECU response"));
   uint8_t sync = 0, k1 = 0, k2 = 0;
-  
-  if (!readKwByte(&sync, FIRST_TIMEOUT_MS, false)) {
-    Serial.println(F("zkousim opakovat inicializaci na 10400 baud..."));
-    stopKLineSerialForBitBang();
-    send5BaudByte(ecuAddr);
-    startKLineSerial(10400);
-    if (!readKwByte(&sync, FIRST_TIMEOUT_MS, false)) {
-      Serial.println(F("ECU neodpovedela na 5-baud inicializaci."));
-      return false;
-    }
-  }
-  
+  if (!readKwByte(&sync, FIRST_TIMEOUT_MS, false)) return false;
   if (!readKwByte(&k1, BYTE_TIMEOUT_MS, false)) return false;
   if (!readKwByte(&k2, BYTE_TIMEOUT_MS, false)) return false;
-  if (sync == 0x55) Serial.println(F("sync byte is OK (0x55)"));
-  Serial.print(F("KW1281 Key bytes: 0x")); printHexByte(k1); Serial.print(F(" 0x")); printHexByte(k2); Serial.println();
-  
+  if (sync != 0x55) {
+    Serial.println(F("KW1281 invalid sync byte"));
+    return false;
+  }
+  Serial.println(F("sync byte is OK"));
   delay(40);
   sendComplement(k2);
   Serial.println(F("KW1281 init OK"));
@@ -430,100 +397,53 @@ void readOnlyIdentification() {
     return;
   }
   readIdentification();
+  Serial.println(F("APP_ID_DONE"));
 }
 
-void formatSimosValue(uint8_t type, uint8_t a, uint8_t b, char *out, size_t outLen) {
-  float v = 0.0f;
-  switch (type) {
-    case 1:
-      v = 0.2f * a * b;
-      snprintf(out, outLen, "%.0f ot/min", v);
-      break;
-    case 5:
-      v = a * (b - 100) * 0.1f;
-      snprintf(out, outLen, "%.1f °C", v);
-      break;
-    case 7:
-      v = 0.01f * 256 * a + 0.01f * b;
-      snprintf(out, outLen, "%.2f V", v);
-      break;
-    case 14:
-      v = 0.001f * 256 * a + 0.001f * b;
-      snprintf(out, outLen, "%.3f V", v);
-      break;
-    case 15:
-      v = 0.01f * 256 * a + 0.01f * b;
-      snprintf(out, outLen, "%.2f ms", v);
-      break;
-    case 19:
-      v = a * b * 0.01f;
-      snprintf(out, outLen, "%.2f l", v);
-      break;
-    case 24:
-      v = 0.001f * 256 * a + 0.001f * b;
-      snprintf(out, outLen, "%.3f A", v);
-      break;
-    case 36:
-      v = 2560.0f * a + 10.0f * b;
-      snprintf(out, outLen, "%.0f km", v);
-      break;
-    case 44:
-      snprintf(out, outLen, "%02d:%02d", a, b);
-      break;
-    default:
-      snprintf(out, outLen, "%u / %u", a, b);
-      break;
-  }
+bool readRawGroup(uint8_t group, uint8_t *body, uint8_t *bodyLen) {
+  // 0x29 je standardní čtení normované skupiny: payload obsahuje jen číslo skupiny.
+  uint8_t req[1] = { group };
+  if (!sendBlock(KWP_REQUEST_GROUP, req, 1)) return false;
+  uint8_t type = 0, data[MAX_DATA], len = 0;
+  if (!readBlock(&type, data, &len, 2000)) return false;
+  if (type != KWP_GROUP_DATA || len < 3 || (len % 3) != 0) return false;
+  *bodyLen = len;
+  for (uint8_t i = 0; i < len; i++) body[i] = data[i];
+  return true;
 }
 
-void parseGroup(const uint8_t *data, uint8_t len, uint8_t sampleIdx) {
-  if (len < 10) return;
-  char r1[24], r2[24], r3[24], r4[24];
-  formatSimosValue(data[0], data[1], data[2], r1, sizeof(r1));
-  formatSimosValue(data[3], data[4], data[5], r2, sizeof(r2));
-  formatSimosValue(data[6], data[7], data[8], r3, sizeof(r3));
-  formatSimosValue(data[9], data[10], data[11], r4, sizeof(r4));
-
-  float rpmVal = 0.0f;
-  if (data[0] == 1) rpmVal = 0.2f * data[1] * data[2];
-  float voltVal = 0.0f;
-  if (data[3] == 7) voltVal = 0.01f * 256 * data[4] + 0.01f * data[5];
-  float thrVal = 0.0f;
-  if (data[6] == 7) thrVal = 0.01f * 256 * data[7] + 0.01f * data[8];
-
-  Serial.print(F("APP_LIVE|"));
-  Serial.print(sampleIdx);
-  Serial.print('|');
-  Serial.print(rpmVal, 0);
-  Serial.print('|');
-  Serial.print(voltVal, 2);
-  Serial.print('|');
-  Serial.print(thrVal, 1);
-  Serial.print('|');
-  Serial.print(r1);
-  Serial.print('|');
-  Serial.print(r2);
-  Serial.print('|');
-  Serial.print(r3);
-  Serial.print('|');
-  Serial.println(r4);
+void emitLiveField(uint8_t sample, uint8_t group, uint8_t cell, uint8_t formula, uint8_t a, uint8_t b) {
+  // Každé pole E7 má přesně tři bajty: formát, A a B. Dekódování patří PC aplikaci,
+  // aby se nezaměňoval formátovací bajt za naměřenou hodnotu.
+  Serial.print(F("APP_LIVE_FIELD|"));
+  Serial.print(sample); Serial.print('|');
+  Serial.print(group); Serial.print('|');
+  Serial.print(cell); Serial.print('|');
+  Serial.print(formula); Serial.print('|');
+  Serial.print(a); Serial.print('|');
+  Serial.println(b);
 }
 
 void liveData() {
-  Serial.println(F("KW1281 live data stream (Function 08, Group 001)"));
-  if (!wakeKw1281()) {
-    Serial.println(F("init failed"));
-    return;
-  }
+  Serial.println(F("KW1281 SIMOS 2P measuring blocks"));
+  if (!wakeKw1281()) return;
   readIdentification();
-  uint8_t grp[1] = { 0x01 };
-  if (!sendBlock(KWP_REQUEST_GROUP, grp, 1)) return;
-  for (uint8_t s = 1; s <= 20; s++) {
-    uint8_t type = 0, data[MAX_DATA], len = 0;
-    if (!readBlock(&type, data, &len, 2500)) return;
-    if (type == KWP_GROUP_DATA) parseGroup(data, len, s);
-    if (!sendBlock(KWP_ACK, NULL, 0)) return;
-    delay(80);
+  // Skupiny uvedené v dílenské příručce Felicia / SIMOS 2P. Jsou pouze čtené.
+  const uint8_t groups[] = { 1, 3, 5, 7, 8, 9, 10, 11, 12, 15, 16, 17, 19, 20, 21, 97, 99 };
+  for (uint8_t sample = 1; sample <= 10; sample++) {
+    uint8_t groupsRead = 0;
+    for (uint8_t g = 0; g < sizeof(groups); g++) {
+      uint8_t body[MAX_DATA], bodyLen = 0;
+      if (readRawGroup(groups[g], body, &bodyLen)) {
+        groupsRead++;
+        for (uint8_t pos = 0, cell = 1; pos < bodyLen; pos += 3, cell++) {
+          emitLiveField(sample, groups[g], cell, body[pos], body[pos + 1], body[pos + 2]);
+        }
+      }
+      delay(35);
+    }
+    if (groupsRead == 0) break;
+    delay(650);
   }
   Serial.println(F("APP_LIVE_DONE"));
 }
@@ -536,202 +456,45 @@ void basicSetting098() {
     return;
   }
   readIdentification();
-  uint8_t grp[1] = { 0x62 }; // 0x62 = 98 dec
-  if (!sendBlock(KWP_BASIC_SETTING, grp, 1)) {
+  uint8_t req[1] = { 98 };
+  if (!sendBlock(KWP_BASIC_SETTING, req, 1)) {
     Serial.println(F("APP_ADP|FAIL_SEND"));
     return;
   }
   uint8_t type = 0, data[MAX_DATA], len = 0;
   if (!readBlock(&type, data, &len, 4000)) {
-    Serial.println(F("APP_ADP|TIMEOUT"));
+    Serial.println(F("APP_ADP|FAIL_RESP"));
     return;
   }
   if (type == KWP_GROUP_DATA) {
     Serial.println(F("APP_ADP|OK"));
     Serial.println(F("Throttle adaptation ADP OK"));
-  } else {
+  } else if (type == KWP_REFUSE) {
     Serial.println(F("APP_ADP|REFUSED"));
-  }
-  sendBlock(0x06, NULL, 0); // End output
-}
-
-void resetAdaptations() {
-  Serial.println(F("APP_RESET_ADP|START"));
-  Serial.println(F("KW1281 reset adaptations (Function 10, Channel 00)"));
-  if (!wakeKw1281()) {
-    Serial.println(F("APP_RESET_ADP|FAIL_INIT"));
-    return;
-  }
-  readIdentification();
-  uint8_t chan[1] = { 0x00 };
-  if (!sendBlock(KWP_ADAPTATION, chan, 1)) {
-    Serial.println(F("APP_RESET_ADP|FAIL_SEND"));
-    return;
-  }
-  uint8_t type = 0, data[MAX_DATA], len = 0;
-  if (!readBlock(&type, data, &len, 3000)) {
-    Serial.println(F("APP_RESET_ADP|TIMEOUT"));
-    return;
-  }
-  if (type == KWP_ACK || type == KWP_GROUP_DATA) {
-    Serial.println(F("APP_RESET_ADP|OK"));
   } else {
-    Serial.println(F("APP_RESET_ADP|REFUSED"));
+    Serial.println(F("APP_ADP|FAIL_UNKNOWN"));
   }
-}
-
-void testActuators() {
-  Serial.println(F("APP_ACT|START"));
-  Serial.println(F("KW1281 output tests (Function 03)"));
-  if (!wakeKw1281()) {
-    Serial.println(F("APP_ACT|FAIL_INIT"));
-    return;
-  }
-  readIdentification();
-  if (!sendBlock(KWP_OUTPUT_TESTS, NULL, 0)) {
-    Serial.println(F("APP_ACT|FAIL_SEND"));
-    return;
-  }
-  uint8_t type = 0, data[MAX_DATA], len = 0;
-  if (readBlock(&type, data, &len, 3000)) {
-    Serial.println(F("APP_ACT|RUNNING"));
-  } else {
-    Serial.println(F("APP_ACT|FAIL_RESP"));
-  }
-}
-
-bool autoDetectPins() {
-  struct PinPair { uint8_t rx; uint8_t tx; const char* name; };
-  PinPair pairs[] = {
-    { 20, 21, "ESP32-C3 SuperMini (RX=20, TX=21)" },
-    { 1, 2, "ESP32-C3 DevKit (RX=1, TX=2)" },
-    { 4, 5, "ESP32-C3 Alt1 (RX=4, TX=5)" },
-    { 6, 7, "ESP32-C3 Alt2 (RX=6, TX=7)" },
-    { 0, 1, "ESP32-C3 Alt3 (RX=0, TX=1)" }
-  };
-  
-  for (uint8_t i = 0; i < sizeof(pairs)/sizeof(pairs[0]); i++) {
-    uint8_t rx = pairs[i].rx;
-    uint8_t tx = pairs[i].tx;
-    
-    pinMode(rx, INPUT);
-    pinMode(tx, OUTPUT);
-    digitalWrite(tx, HIGH);
-    delay(30);
-    int hi = digitalRead(rx);
-    
-    digitalWrite(tx, LOW);
-    delay(30);
-    int lo = digitalRead(rx);
-    
-    digitalWrite(tx, HIGH);
-    delay(30);
-    int hi2 = digitalRead(rx);
-    
-    if (hi == HIGH && lo == LOW && hi2 == HIGH) {
-      klineRxPin = rx;
-      klineTxPin = tx;
-      Serial.print(F(">>> AUTO-DETECT: Nalezen aktivni obvod na: "));
-      Serial.println(pairs[i].name);
-      return true;
-    }
-  }
-  return false;
 }
 
 void hardwareTest() {
   stopKLineSerialForBitBang();
-  Serial.println(F("\n--- DIAGNOSTIKA FYZICKEHO HARDWARE K-LINKY ---"));
-  
-  bool detected = autoDetectPins();
-  
-  digitalWrite(klineTxPin, HIGH);
-  delay(150);
-  int rxIdle = digitalRead(klineRxPin);
-  
-  digitalWrite(klineTxPin, LOW);
-  delay(150);
-  int rxActive = digitalRead(klineRxPin);
-  
-  digitalWrite(klineTxPin, HIGH);
-  delay(150);
-  int rxRestored = digitalRead(klineRxPin);
-  
-  Serial.print(F("1. Stav linky v klidu (TX=HIGH na GPIO "));
-  Serial.print(klineTxPin);
-  Serial.print(F("): RX (GPIO "));
-  Serial.print(klineRxPin);
-  Serial.print(F(") = "));
-  Serial.println(rxIdle == HIGH ? F("HIGH (3.3V) -> OK (12V pull-up je pritomen)") : F("LOW (0V) -> CHYBA!"));
-  
-  Serial.print(F("2. Stav linky pri stazeni (TX=LOW): RX = "));
-  Serial.println(rxActive == LOW ? F("LOW (0V) -> OK (Tranzistor stahuje k zemi)") : F("HIGH (3.3V) -> CHYBA!"));
-  
-  Serial.print(F("3. Navrat do klidoveho stavu (TX=HIGH): RX = "));
-  Serial.println(rxRestored == HIGH ? F("HIGH (3.3V) -> OK") : F("LOW (0V) -> CHYBA!"));
-  
-  Serial.println(F("\n--- STAV VSECH GPIO PINU NA ESP32-C3 ---"));
-  uint8_t probePins[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 21 };
-  for (uint8_t i = 0; i < sizeof(probePins); i++) {
-    uint8_t p = probePins[i];
-    if (p == klineTxPin || p == LED_PIN) continue;
-    pinMode(p, INPUT);
-    int val = digitalRead(p);
-    Serial.print(F(" GPIO "));
-    if (p < 10) Serial.print(' ');
-    Serial.print(p);
-    Serial.print(F(": "));
-    Serial.println(val == HIGH ? F("HIGH (3.3V)") : F("LOW (0V)"));
-  }
-  Serial.println(F("----------------------------------------\n"));
-  
-  if (rxIdle == HIGH && rxActive == LOW && rxRestored == HIGH) {
+  digitalWrite(KLINE_TX_PIN, HIGH); delay(150); int hi = digitalRead(KLINE_RX_PIN);
+  digitalWrite(KLINE_TX_PIN, LOW); delay(150); int lo = digitalRead(KLINE_RX_PIN);
+  digitalWrite(KLINE_TX_PIN, HIGH); delay(150); int hi2 = digitalRead(KLINE_RX_PIN);
+  if (hi == HIGH && lo == LOW && hi2 == HIGH) {
     Serial.println(F("APP_HW|OK"));
-    Serial.println(F("VYSLEDEK: Hardwarovy obvod prevodniku je 100% FUNKCNI!"));
+    Serial.println(F("hardware round-trip looks OK"));
   } else {
     Serial.println(F("APP_HW|FAIL"));
-    if (rxIdle == LOW && rxActive == LOW) {
-      Serial.println(F("PRICINA CHYBY: K-linka je trvale na 0V (GND). Zkontrolujte:"));
-      Serial.println(F(" - Zda je zapalovani vozu ZAPNUTO (kontrolky sviti)"));
-      Serial.println(F(" - Zda je privedeno +12V z OBD pinu 16 na pull-up odpor prevodniku (510R / 1k)"));
-      Serial.println(F(" - Zda je napetovy delic z K-linky spravne pripojen"));
-    } else if (rxIdle == HIGH && rxActive == HIGH) {
-      Serial.println(F("PRICINA CHYBY: Tranzistor nestahuje K-linku k zemi. Zkontrolujte:"));
-      Serial.println(F(" - Zapojeni baze tranzistoru (GPIO pres odpor cca 1k-4.7k)"));
-      Serial.println(F(" - Zapojeni emitoru tranzistoru na spolecne GND"));
-    }
+    Serial.println(F("check configured K-line GPIO, divider, GND and K-line pull-up"));
   }
-  Serial.println(F("----------------------------------------------\n"));
-}
-
-void scanAllEcus() {
-  Serial.println(F("\n--- HLEDANI VSECH JEDNOTEK VE VOZU (SCAN) ---"));
-  uint8_t addrs[] = { 0x01, 0x25, 0x15, 0x17 };
-  const char* names[] = { "Motor SIMOS 2P (0x01)", "Imobilizer (0x25)", "Airbag (0x15)", "Pristrojova deska (0x17)" };
-  
-  for (uint8_t i = 0; i < 4; i++) {
-    Serial.print(F("Zkousim se pripojit k: "));
-    Serial.println(names[i]);
-    if (wakeKw1281(addrs[i])) {
-      Serial.print(F(">>> JEDNOTKA NALEZENA A ODPOVÍDÁ: "));
-      Serial.println(names[i]);
-      readIdentification();
-      sendBlock(0x06, NULL, 0); // End session
-      delay(500);
-    } else {
-      Serial.print(F("Bez odezvy: "));
-      Serial.println(names[i]);
-    }
-    delay(400);
-  }
-  Serial.println(F("--- SCAN DOKONCEN ---\n"));
 }
 
 void menu() {
   Serial.println();
   Serial.println(F("=================================================="));
-  Serial.println(F("Diagnostika Felicia K-line (ESP32-C3 V0.3B)"));
-  Serial.println(F("f=závady, c=smazat, i=identifikace, l=živá data, a=klapka 098, r=reset adaptací, k=akční členy, s=scan všech ECU, t=test linky, ?=menu"));
+  Serial.println(F("Diagnostika Felicia K-line (ESP32-C3 V0.5.0)"));
+  Serial.println(F("f=závady, c=smazat, i=identifikace, l=měřicí bloky, a=klapka 098, t=test linky, ?=menu"));
   Serial.println(F("=================================================="));
 }
 
@@ -741,10 +504,9 @@ void setup() {
   Serial.begin(DEBUG_BAUD);
   delay(500); // Allow USB CDC / bridge to stabilize
   blinkLed(3, 70); // 3x bliknutí na znamení startu ESP32
-  autoDetectPins();
   stopKLineSerialForBitBang();
   Serial.println();
-  Serial.println(F("APP_BOOT|Diagnostika_Felicia_KLine_ESP32|V0.3B"));
+  Serial.println(F("APP_BOOT|Diagnostika_Felicia_KLine_ESP32|V0.5.0"));
   Serial.println(F("Boot OK - ESP32 Ready"));
   menu();
 }
@@ -758,12 +520,8 @@ void loop() {
     else if (c == 'i' || c == 'I') readOnlyIdentification();
     else if (c == 'l' || c == 'L') liveData();
     else if (c == 'a' || c == 'A') basicSetting098();
-    else if (c == 'r' || c == 'R') resetAdaptations();
-    else if (c == 'k' || c == 'K') testActuators();
-    else if (c == 's' || c == 'S') scanAllEcus();
     else if (c == 't' || c == 'T') hardwareTest();
     else if (c == '?') menu();
   }
   delay(5);
 }
-

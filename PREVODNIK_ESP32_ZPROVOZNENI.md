@@ -2,7 +2,7 @@
 
 **Projekt:** Diagnostika řídicí jednotky motoru Siemens SIMOS 2P (Škoda Felicia 1.3 MPI)  
 **Hardware:** ESP32-C3 SuperMini / DevKit + K-Line převodník (L9637D / MC33290 / Si9243 / diskrétní tranzistorový obvod)  
-**Komunikační protokol:** ISO 9141-2 / VAG KW1281 (5-Baud Slow Init @ 10 400 Baud)  
+**Komunikační protokol:** ISO 9141-2 / VAG KW1281 (5-Baud Slow Init, poté 9 600 Bd)
 
 ---
 
@@ -13,7 +13,7 @@
    * Převodník úspěšně prošel hardwarovým round-trip testem (`APP_HW|OK`), což potvrzuje, že vysílač (TX) i přijímač (RX) na K-lince jsou elektricky i logicky funkční.
 
 2. **Oddělení časování a protokolu (ESP32 Firmware):**
-   * Časově kritická komunikace (časování na mikrosekundy při 5 baudech a 10 400 baudech) běží přímo v reálném čase na ESP32.
+   * Časově kritická komunikace (5-baudový slow-init a následný přenos 9 600 Bd) běží přímo v reálném čase na ESP32.
    * Počítač s Windows komunikuje s ESP32 po standardní USB sériové lince rychlostí **115 200 Bd**, takže nedochází k chybám v časování způsobeným Windows.
 
 3. **Implementované a funkční funkce protokolu KW1281:**
@@ -29,8 +29,8 @@
 
 | Signál | ESP32-C3 Pin | Popis / Připojení na převodník |
 | :--- | :--- | :--- |
-| **K-Line TX** | `GPIO 21` | Výstup z ESP32 do vstupu TXD budiče K-linky |
-| **K-Line RX** | `GPIO 20` | Vstup do ESP32 z výstupu RXD budiče K-linky |
+| **K-Line TX** | `GPIO 4` | Výstup z ESP32 do vstupu TXD budiče K-linky |
+| **K-Line RX** | `GPIO 5` | Vstup do ESP32 z výstupu RXD budiče K-linky |
 | **GND** | `GND` | Společná kostra (propojeno s pinem 4 a 5 na OBD zásuvce) |
 | **Napájení ESP32** | `5V / USB` | Napájení mikrokontroléru z USB PC |
 | **K-Line Signál** | *OBD Pin 7* | K-line sběrnice vozidla (pullována na +12V přes 510R odpor) |
